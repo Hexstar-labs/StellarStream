@@ -19,12 +19,19 @@ jobs:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
 
+      - name: Install wasm32v1-none target
+        run: rustup target add wasm32v1-none
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             contracts/Contract-V1
             contracts/Contract-V2
+
+      - name: Build Contract-V1 WASM
+        run: cargo build --target wasm32v1-none --release
+        working-directory: contracts/Contract-V1
 
       - name: Check formatting (V1)
         run: cargo fmt --all -- --check
