@@ -588,9 +588,14 @@ fn test_set_admins_replaces_list_and_threshold() {
     let a2 = Address::generate(&env);
     let a3 = Address::generate(&env);
     let new_admins = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
-    let signers = soroban_sdk::vec![&env, admin.clone()]; // current quorum = 1
+    let op = Operation::SetAdmins(new_admins, 2u32);
 
-    client.set_admins(&signers, &new_admins, &2u32);
+    client.schedule_op(&op);
+    
+    // Advance time by 48 hours and 1 second
+    env.ledger().set_timestamp(48 * 60 * 60 + 1);
+    
+    client.execute_op(&op);
 
     assert_eq!(client.get_threshold(), 2u32);
     assert_eq!(client.get_admins().len(), 3u32);
@@ -965,7 +970,7 @@ fn test_create_batch_streams_atomic_failure() {
     let (token_id, token_client, asset_client) = create_token(&env, &token_admin);
 
     // Mint insufficient tokens
-    asset_client.mint(&sender, &100_000_000);
+    asset_client.mint(&sender, &200_000_000);
 
     let (_, v2_client) = setup_v2(&env, &admin);
 
@@ -1375,4 +1380,98 @@ fn test_rebalance_after_clawback() {
     let (balance, sum) = v2_client.check_balance_integrity(&token_id);
     assert_eq!(balance, 500_000_000);
     assert_eq!(sum, 500_000_000);
+}
+
+#[test]
+fn test_get_streams_batch_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let receiver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_id, _token_client, asset_client) = create_token(&env, &token_admin);
+
+    asset_client.mint(&sender, &1_000_000_000);
+
+    let (_, v2_client) = setup_v2(&env, &admin);
+
+    // Create 3 streams
+    v2_client.create_stream(&StreamArgs {
+        sender: sender.clone(),
+        receiver: receiver.clone(),
+        token: token_id.clone(),
+        total_amount: 100_000_000,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 100,
+        step_duration: 0,
+        multiplier_bps: 0,
+    });
+    v2_client.create_stream(&StreamArgs {
+        sender: sender.clone(),
+        receiver: receiver.clone(),
+        token: token_id.clone(),
+        total_amount: 200_000_000,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 100,
+        step_duration: 0,
+        multiplier_bps: 0,
+    });
+    v2_client.create_stream(&StreamArgs {
+        sender: sender.clone(),
+        receiver: receiver.clone(),
+        token: token_id.clone(),
+        total_amount: 300_000_000,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 100,
+        step_duration: 0,
+        multiplier_bps: 0,
+    });
+
+    // Advance time to 50s
+    env.ledger().set_timestamp(50);
+
+    // Query batch of ids (0, 1, 2, 3) where 3 is not found
+    let ids = soroban_sdk::vec![&env, 0, 1, 2, 3];
+    let results = v2_client.get_streams_batch(&ids);
+
+    assert_eq!(results.len(), 4);
+
+    // Stream 0: half unlocked (50M)
+    assert_eq!(results.get(0).unwrap().stream_id, 0);
+    assert_eq!(results.get(0).unwrap().unlocked_amount, 50_000_000);
+    assert_eq!(results.get(0).unwrap().status, StreamStatus::Active);
+
+    // Stream 1: half unlocked (100M)
+    assert_eq!(results.get(1).unwrap().stream_id, 1);
+    assert_eq!(results.get(1).unwrap().unlocked_amount, 100_000_000);
+    assert_eq!(results.get(1).unwrap().status, StreamStatus::Active);
+
+    // Stream 2: half unlocked (150M)
+    assert_eq!(results.get(2).unwrap().stream_id, 2);
+    assert_eq!(results.get(2).unwrap().unlocked_amount, 150_000_000);
+    assert_eq!(results.get(2).unwrap().status, StreamStatus::Active);
+
+    // Stream 3: NotFound
+    assert_eq!(results.get(3).unwrap().stream_id, 3);
+    assert_eq!(results.get(3).unwrap().status, StreamStatus::NotFound);
+}
+
+#[test]
+fn test_get_streams_batch_limit_failure() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let (_, v2_client) = setup_v2(&env, &admin);
+
+    let mut ids = soroban_sdk::vec![&env];
+    for i in 0..26 {
+        ids.push_back(i);
+    }
+
+    let result = v2_client.try_get_streams_batch(&ids);
+    assert!(result.is_err());
 }
