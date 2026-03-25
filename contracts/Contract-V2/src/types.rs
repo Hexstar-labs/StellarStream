@@ -109,3 +109,12 @@ pub struct ContractUnpausedEvent {
     pub admin: Address,
     pub timestamp: u64,
 }
+
+/// Summary metrics for the V2 contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolHealthV2 {
+    pub total_v2_tvl: i128,
+    pub active_v2_users: u32,
+    pub total_v2_streams: u64,
+}

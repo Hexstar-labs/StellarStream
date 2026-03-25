@@ -1,7 +1,7 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
 
 mod errors;
 mod storage;
@@ -34,6 +34,58 @@ impl Contract {
 
     pub fn admin(env: Env) -> Address {
         storage::get_admin(&env)
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #400 — Multi-sig Admin Handover
+    // ----------------------------------------------------------------
+
+    /// Replace the admin set and threshold.
+    ///
+    /// `signers` must contain at least the current threshold of existing
+    /// admins so the handover itself is multi-sig protected.
+    pub fn set_admins(
+        env: Env,
+        signers: Vec<Address>, // current admins authorising this change
+        new_admins: Vec<Address>,
+        new_threshold: u32,
+    ) -> Result<(), ContractError> {
+        // Validate new config before touching state.
+        if new_threshold == 0 || new_threshold > new_admins.len() {
+            return Err(ContractError::InvalidThreshold);
+        }
+
+        // Require current multi-sig quorum.
+        storage::require_multisig(&env, &signers)?;
+
+        storage::set_admin_list_raw(&env, &new_admins, new_threshold);
+        Ok(())
+    }
+
+    /// Return the current admin list.
+    pub fn get_admins(env: Env) -> Vec<Address> {
+        storage::get_admin_list(&env)
+    }
+
+    /// Return the current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        storage::get_threshold(&env)
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #396 — Dust Threshold
+    // ----------------------------------------------------------------
+
+    /// Return the minimum stream amount for `asset` (default: 10 XLM).
+    pub fn get_min_value(env: Env, asset: Address) -> i128 {
+        storage::get_min_value(&env, &asset)
+    }
+
+    /// Override the minimum for a specific asset. Admin-only.
+    pub fn set_min_value(env: Env, asset: Address, min: i128) -> Result<(), ContractError> {
+        storage::get_admin(&env).require_auth();
+        storage::set_min_value(&env, &asset, min);
+        Ok(())
     }
 
     // ----------------------------------------------------------------
@@ -106,6 +158,7 @@ impl Contract {
         };
 
         storage::set_stream(&env, v2_stream_id, &v2_stream);
+        storage::update_stats(&env, remaining, &v1_stream.sender, &caller);
 
         env.events().publish(
             (symbol_short!("migrated"), caller.clone()),
@@ -123,6 +176,26 @@ impl Contract {
 
     pub fn get_stream(env: Env, stream_id: u64) -> Option<StreamV2> {
         storage::get_stream(&env, stream_id)
+    }
+
+    pub fn get_v2_protocol_health(env: Env) -> types::ProtocolHealthV2 {
+        storage::get_health(&env)
+    }
+    
+    // ----------------------------------------------------------------
+    // Issue #404 — Bulk TTL Extension
+    // ----------------------------------------------------------------
+
+    /// Extend persistent storage TTL for each stream ID in `ids`.
+    ///
+    /// Public and permissionless — anyone (altruistic keeper, incentivised
+    /// bot, or the stream participants themselves) can call this to prevent
+    /// active streams from expiring due to storage rent.
+    ///
+    /// Returns the number of streams whose TTL was actually extended
+    /// (IDs that no longer exist are silently skipped).
+    pub fn bump_active_streams_ttl(env: Env, ids: Vec<u64>) -> u32 {
+        storage::bump_streams_ttl(&env, &ids)
     }
 
     // ----------------------------------------------------------------
@@ -198,6 +271,11 @@ impl Contract {
             return Err(ContractError::ExpiredDeadline);
         }
 
+        // ── Guard: dust threshold ─────────────────────────────────────
+        if total_amount < storage::get_min_value(&env, &token) {
+            return Err(ContractError::BelowDustThreshold);
+        }
+
         // ── Guard: nonce ─────────────────────────────────────────────
         let nonce_key = (symbol_short!("NONCE"), sender_pubkey.clone());
         let stored_nonce: u64 = env.storage().instance().get(&nonce_key).unwrap_or(0u64);
@@ -259,6 +337,7 @@ impl Contract {
         };
 
         storage::set_stream(&env, stream_id, &stream);
+        storage::update_stats(&env, total_amount, &sender_addr, &receiver);
 
         // ── Emit event ────────────────────────────────────────────────
         env.events().publish(
